@@ -344,6 +344,8 @@
         hasAttemptedEnable: false,
         userIntervened: false,
         lastKnownSubtitleEnabled: false,
+        hasNormalSubtitle: false,
+        subtitleCheckCompleted: false,
       };
     }
 
@@ -358,6 +360,8 @@
       hasAttemptedEnable: false,
       userIntervened: false,
       lastKnownSubtitleEnabled: false,
+      hasNormalSubtitle: false,
+      subtitleCheckCompleted: false,
     };
 
     return currentIdentityState;
@@ -493,17 +497,8 @@
     return results;
   }
 
-  function objectHasAiSubtitle(value) {
-    if (!value) return false;
-
-    if (Array.isArray(value)) {
-      return value.some((item) => objectHasAiSubtitle(item));
-    }
-
-    if (typeof value !== 'object') {
-      if (typeof value === 'string') return AI_TEXT_PATTERN.test(value);
-      return false;
-    }
+  function isAiSubtitleObject(value) {
+    if (!value || typeof value !== 'object') return false;
 
     const textBlob = Object.entries(value)
       .map(([key, val]) => `${key}:${typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean' ? String(val) : ''}`)
@@ -526,28 +521,76 @@
       value.machineGenerated,
     ];
 
-    if (flagValues.some((flag) => flag === true || flag === 1 || flag === '1' || String(flag).toLowerCase() === 'true')) {
-      return true;
+    return flagValues.some((flag) => flag === true || flag === 1 || flag === '1' || String(flag).toLowerCase() === 'true');
+  }
+
+  function flattenSubtitleItems(value, results = []) {
+    if (!value || typeof value !== 'object') return results;
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => flattenSubtitleItems(item, results));
+      return results;
     }
 
-    return Object.values(value).some((child) => child && typeof child === 'object' && objectHasAiSubtitle(child));
+    const keys = Object.keys(value);
+    const hasSubtitleShape = keys.some((key) => /(lan|lang|language|subtitle_url|url|id|ai_type|aiType|source|type|title|label)/i.test(key));
+    if (hasSubtitleShape) {
+      results.push(value);
+    }
+
+    for (const child of Object.values(value)) {
+      if (child && typeof child === 'object') {
+        flattenSubtitleItems(child, results);
+      }
+    }
+
+    return results;
+  }
+
+  function summarizeSubtitleAvailability(items) {
+    let hasAi = false;
+    let hasNormal = false;
+
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+
+      if (isAiSubtitleObject(item)) {
+        hasAi = true;
+        continue;
+      }
+
+      const textBlob = Object.entries(item)
+        .map(([key, val]) => `${key}:${typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean' ? String(val) : ''}`)
+        .join(' | ')
+        .toLowerCase();
+
+      const looksLikeSubtitle = /(subtitle|subtitles|caption|lan|lang|language|zh|cn|jp|en|url)/i.test(textBlob);
+      if (looksLikeSubtitle) {
+        hasNormal = true;
+      }
+    }
+
+    return { hasAi, hasNormal };
   }
 
   function detectAiSubtitleFromPageData() {
     const candidates = [getInitialState(), ...getPlayInfoCandidates()].filter(Boolean);
 
     for (const candidate of candidates) {
-      if (objectHasAiSubtitle(candidate)) {
-        return { found: true, source: 'page-data-direct' };
+      const subtitleCandidates = collectSubtitleCandidates(candidate);
+      const subtitleItems = flattenSubtitleItems(subtitleCandidates);
+      const summary = summarizeSubtitleAvailability(subtitleItems);
+
+      if (summary.hasNormal) {
+        return { found: false, hasNormalSubtitle: true, source: 'page-data-normal-subtitle' };
       }
 
-      const subtitleCandidates = collectSubtitleCandidates(candidate);
-      if (subtitleCandidates.some((item) => objectHasAiSubtitle(item))) {
-        return { found: true, source: 'page-data-subtitle-list' };
+      if (summary.hasAi) {
+        return { found: true, hasNormalSubtitle: false, source: 'page-data-ai-subtitle' };
       }
     }
 
-    return { found: false, source: 'page-data' };
+    return { found: false, hasNormalSubtitle: false, source: 'page-data' };
   }
 
   async function fetchJson(url) {
@@ -566,7 +609,7 @@
   }
 
   async function detectAiSubtitleFromApi(identity) {
-    if (!identity?.cid) return { found: false, source: 'api-no-cid' };
+    if (!identity?.cid) return { found: false, hasNormalSubtitle: false, source: 'api-no-cid' };
 
     const endpoints = [
       `https://api.bilibili.com/x/player/v2?cid=${encodeURIComponent(identity.cid)}&bvid=${encodeURIComponent(identity.bvid || '')}`,
@@ -577,44 +620,62 @@
     for (const endpoint of endpoints) {
       try {
         const data = await fetchJson(endpoint);
-        if (objectHasAiSubtitle(data)) {
-          return { found: true, source: endpoint };
+        const subtitleCandidates = collectSubtitleCandidates(data);
+        const subtitleItems = flattenSubtitleItems(subtitleCandidates);
+        const summary = summarizeSubtitleAvailability(subtitleItems);
+
+        if (summary.hasNormal) {
+          return { found: false, hasNormalSubtitle: true, source: endpoint };
+        }
+
+        if (summary.hasAi) {
+          return { found: true, hasNormalSubtitle: false, source: endpoint };
         }
       } catch (error) {
         log('接口检测失败', endpoint, error);
       }
     }
 
-    return { found: false, source: 'api' };
+    return { found: false, hasNormalSubtitle: false, source: 'api' };
   }
 
   function detectAiSubtitleFromDom() {
-    const candidates = [
-      ...document.querySelectorAll('[class*="subtitle"], [class*="caption"], [data-tooltip], button, span, div, li'),
-    ];
+    const aiItem = getAiSubtitleItem();
+    const subtitleNodes = Array.from(document.querySelectorAll('[class*="subtitle"], [class*="caption"], [data-lan], [data-value], button, span, div, li'));
 
-    const hit = candidates.find((node) => {
-      const text = `${node.textContent || ''} ${node.getAttribute?.('data-tooltip') || ''} ${node.getAttribute?.('aria-label') || ''}`.trim();
-      return AI_TEXT_PATTERN.test(text);
+    const hasNormalSubtitle = subtitleNodes.some((node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (aiItem && node === aiItem) return false;
+
+      const text = `${node.textContent || ''} ${node.getAttribute('data-lan') || ''} ${node.getAttribute('data-value') || ''} ${node.getAttribute('aria-label') || ''}`.trim();
+      if (!text) return false;
+      if (AI_TEXT_PATTERN.test(text) || /ai-zh/i.test(text)) return false;
+      return /字幕|中文|英文|日文|双语|subtitle|caption/i.test(text);
     });
 
-    return { found: !!hit, source: hit ? 'dom' : 'dom-none' };
+    return {
+      found: !!aiItem && !hasNormalSubtitle,
+      hasNormalSubtitle,
+      source: aiItem ? 'dom-ai-item' : 'dom-none',
+    };
   }
 
   async function detectAiSubtitle(identity) {
     const fromPage = detectAiSubtitleFromPageData();
-    if (fromPage.found) return fromPage;
+    if (fromPage.hasNormalSubtitle || fromPage.found) return fromPage;
 
     const fromApi = await detectAiSubtitleFromApi(identity);
-    if (fromApi.found) return fromApi;
+    if (fromApi.hasNormalSubtitle || fromApi.found) return fromApi;
 
     return detectAiSubtitleFromDom();
   }
 
-  async function enableSubtitle(identity, state) {
+  async function enableSubtitle(identity, state, options = {}) {
     if (!identity || !state) return false;
-    if (state.hasAttemptedEnable) return isSubtitleEnabled();
-    if (state.userIntervened) return false;
+
+    const force = Boolean(options.force);
+    if (!force && state.hasAttemptedEnable) return isSubtitleEnabled();
+    if (!force && state.userIntervened) return false;
 
     if (isSubtitleEnabled()) {
       state.hasAttemptedEnable = true;
@@ -727,15 +788,28 @@
       return;
     }
 
-    const detection = await detectAiSubtitle(identity);
-    if (token !== processToken) return;
-
-    if (!detection.found) {
-      log('当前视频未检测到 AI 字幕', identity.key, detection.source);
+    if (state.subtitleCheckCompleted && state.hasNormalSubtitle) {
+      log('当前视频已确认存在普通字幕，跳过重复检测', identity.key);
       return;
     }
 
-    log('检测到 AI 字幕，准备自动开启', identity.key, detection.source);
+    const detection = await detectAiSubtitle(identity);
+    if (token !== processToken) return;
+
+    state.subtitleCheckCompleted = true;
+    state.hasNormalSubtitle = Boolean(detection.hasNormalSubtitle);
+
+    if (detection.hasNormalSubtitle) {
+      log('当前视频存在普通字幕，跳过自动开启 AI 字幕', identity.key, detection.source);
+      return;
+    }
+
+    if (!detection.found) {
+      log('当前视频未检测到可自动开启的 AI 字幕', identity.key, detection.source);
+      return;
+    }
+
+    log('当前视频无普通字幕，检测到 AI 字幕，准备自动开启', identity.key, detection.source);
     await enableSubtitle(identity, state);
   }
 
@@ -861,10 +935,14 @@
 
     if (enabled) {
       if (identity) {
-        resetIdentityState(identity);
+        const state = resetIdentityState(identity);
         currentIdentityKey = identity.key;
+        enableSubtitle(identity, state, { force: true }).catch((error) => {
+          log('手动开启当前字幕失败', error);
+        });
+      } else {
+        scheduleCheck('manual-enable');
       }
-      scheduleCheck('manual-enable');
     } else {
       processToken += 1;
       if (identity) {
