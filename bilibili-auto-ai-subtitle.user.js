@@ -18,6 +18,7 @@
   const STORAGE_KEY_PANEL_VISIBLE = 'bili-auto-ai-subtitle:panel-visible';
   const STORAGE_KEY_TOGGLE_SHORTCUT = 'bili-auto-ai-subtitle:shortcut-toggle';
   const STORAGE_KEY_PANEL_SHORTCUT = 'bili-auto-ai-subtitle:shortcut-panel';
+  const STORAGE_KEY_PREFERRED_AI_LANGUAGE = 'bili-auto-ai-subtitle:preferred-ai-language';
   const MAX_PLAYER_WAIT_ATTEMPTS = 10;
   const MAX_ENABLE_ATTEMPTS = 3;
   const PROCESS_BACKOFF_MS = [250, 500, 900, 1400, 2000, 2800, 3600, 4500, 5500, 7000];
@@ -48,11 +49,15 @@
     '.bilibili-player-video-subtitle .subtitle-item',
   ];
   const AI_TEXT_PATTERN = /(AI字幕|AI 字幕|自动生成|自动字幕|机器生成|智能字幕)/i;
-  const AI_SUBTITLE_ITEM_SELECTORS = [
-    'div[data-lan="ai-zh"]',
-    '[data-lan="ai-zh"]',
-    '[data-value="ai-zh"]',
+  const AI_LANGUAGE_LABELS = {
+    zh: '中文',
+    en: '英文',
+  };
+  const AI_SUBTITLE_FALLBACK_SELECTORS = [
     '[class*="subtitle"] [data-lan*="ai"]',
+    '[class*="subtitle"] [data-value*="ai"]',
+    '[data-lan*="ai"]',
+    '[data-value*="ai"]',
   ];
   const SUBTITLE_CLOSE_SWITCH_SELECTORS = [
     '.bpx-player-ctrl-subtitle-close-switch',
@@ -194,6 +199,45 @@
     return [...modifiers, key].join('+');
   }
 
+  function normalizePreferredAiLanguage(input) {
+    if (typeof input !== 'string') return '';
+
+    const normalized = input.trim().toLowerCase();
+    if (!normalized) return '';
+
+    if (['zh', 'zh-cn', 'cn', '中文', '简中', '简体中文', 'chinese'].includes(normalized)) return 'zh';
+    if (['en', 'en-us', 'en-gb', '英文', '英语', 'english'].includes(normalized)) return 'en';
+
+    return '';
+  }
+
+  function getPreferredAiLanguageLabel(value) {
+    return AI_LANGUAGE_LABELS[value] || AI_LANGUAGE_LABELS.zh;
+  }
+
+  function getPreferredAiLanguage() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_PREFERRED_AI_LANGUAGE);
+      return normalizePreferredAiLanguage(saved || 'zh') || 'zh';
+    } catch (error) {
+      log('读取 AI 字幕语言偏好失败，使用默认值', error);
+      return 'zh';
+    }
+  }
+
+  function setPreferredAiLanguage(value) {
+    const normalized = normalizePreferredAiLanguage(value);
+    if (!normalized) return '';
+
+    try {
+      localStorage.setItem(STORAGE_KEY_PREFERRED_AI_LANGUAGE, normalized);
+    } catch (error) {
+      log('保存 AI 字幕语言偏好失败', error);
+    }
+
+    return normalized;
+  }
+
   function getShortcut(storageKey, fallback) {
     try {
       const saved = localStorage.getItem(storageKey);
@@ -258,6 +302,28 @@
     showToast(`${label} 快捷键已设为 ${normalized}`);
   }
 
+  function configurePreferredAiLanguage() {
+    const current = getPreferredAiLanguage();
+    const currentLabel = getPreferredAiLanguageLabel(current);
+    const nextValue = window.prompt('请输入 AI 字幕语言偏好：中文 / zh / 英文 / en', currentLabel);
+    if (nextValue === null) return;
+
+    const normalized = normalizePreferredAiLanguage(nextValue);
+    if (!normalized) {
+      showToast(`AI 字幕语言无效，当前仍为${currentLabel}`);
+      return;
+    }
+
+    const saved = setPreferredAiLanguage(normalized);
+    if (!saved) {
+      showToast(`AI 字幕语言保存失败，当前仍为${currentLabel}`);
+      return;
+    }
+
+    updateControlView();
+    showToast(`AI 字幕语言已设为${getPreferredAiLanguageLabel(saved)}`);
+  }
+
   function registerMenuCommands() {
     if (typeof GM_registerMenuCommand !== 'function') return;
 
@@ -267,6 +333,10 @@
 
     GM_registerMenuCommand(`设置面板显隐键 (${getShortcut(STORAGE_KEY_PANEL_SHORTCUT, 'Alt+H')})`, () => {
       configureShortcut('面板显隐', STORAGE_KEY_PANEL_SHORTCUT, 'Alt+H');
+    });
+
+    GM_registerMenuCommand(`设置 AI 字幕语言（${getPreferredAiLanguageLabel(getPreferredAiLanguage())}）`, () => {
+      configurePreferredAiLanguage();
     });
   }
 
@@ -389,18 +459,60 @@
     }) || null;
   }
 
+  function getPreferredAiLanguageSelectors(language) {
+    if (language === 'en') {
+      return [
+        '[data-lan="ai-en"]',
+        '[data-value="ai-en"]',
+        'div[data-lan="ai-en"]',
+      ];
+    }
+
+    return [
+      '[data-lan="ai-zh"]',
+      '[data-value="ai-zh"]',
+      'div[data-lan="ai-zh"]',
+    ];
+  }
+
+  function getAiSubtitleTextHints(language) {
+    if (language === 'en') {
+      return ['ai-en', '英文', '英语', 'english', 'en'];
+    }
+
+    return ['ai-zh', '中文', '汉语', 'chinese', 'zh'];
+  }
+
   function getAiSubtitleItem() {
-    for (const selector of AI_SUBTITLE_ITEM_SELECTORS) {
+    const preferredLanguage = getPreferredAiLanguage();
+
+    for (const selector of getPreferredAiLanguageSelectors(preferredLanguage)) {
       const node = document.querySelector(selector);
       if (node instanceof HTMLElement) return node;
     }
 
+    const preferredHints = getAiSubtitleTextHints(preferredLanguage);
     const textCandidates = Array.from(document.querySelectorAll('div, li, span, button')).filter((node) => {
-      const text = `${node.textContent || ''} ${node.getAttribute?.('data-lan') || ''}`.trim();
-      return /ai-zh/i.test(text) || /AI字幕|AI 字幕|自动生成/.test(text);
+      if (!(node instanceof HTMLElement)) return false;
+      const text = `${node.textContent || ''} ${node.getAttribute('data-lan') || ''} ${node.getAttribute('data-value') || ''} ${node.getAttribute('aria-label') || ''}`.trim().toLowerCase();
+      return AI_TEXT_PATTERN.test(text) && preferredHints.some((hint) => text.includes(hint));
     });
 
-    return textCandidates.find((node) => node instanceof HTMLElement) || null;
+    const preferredMatch = textCandidates.find((node) => node instanceof HTMLElement);
+    if (preferredMatch) return preferredMatch;
+
+    for (const selector of AI_SUBTITLE_FALLBACK_SELECTORS) {
+      const node = document.querySelector(selector);
+      if (node instanceof HTMLElement) return node;
+    }
+
+    const fallbackCandidates = Array.from(document.querySelectorAll('div, li, span, button')).filter((node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const text = `${node.textContent || ''} ${node.getAttribute('data-lan') || ''} ${node.getAttribute('data-value') || ''} ${node.getAttribute('aria-label') || ''}`.trim();
+      return AI_TEXT_PATTERN.test(text) || /ai-(zh|en)/i.test(text);
+    });
+
+    return fallbackCandidates.find((node) => node instanceof HTMLElement) || null;
   }
 
   function getSubtitleCloseSwitch() {
@@ -649,7 +761,7 @@
 
       const text = `${node.textContent || ''} ${node.getAttribute('data-lan') || ''} ${node.getAttribute('data-value') || ''} ${node.getAttribute('aria-label') || ''}`.trim();
       if (!text) return false;
-      if (AI_TEXT_PATTERN.test(text) || /ai-zh/i.test(text)) return false;
+      if (AI_TEXT_PATTERN.test(text) || /ai-(zh|en)/i.test(text)) return false;
       return /字幕|中文|英文|日文|双语|subtitle|caption/i.test(text);
     });
 
@@ -914,13 +1026,16 @@
     const visible = getPanelVisible();
     const label = controlRoot.querySelector('[data-role="label"]');
     const toggleShortcut = getShortcut(STORAGE_KEY_TOGGLE_SHORTCUT, 'Alt+A');
+    const preferredLanguage = getPreferredAiLanguageLabel(getPreferredAiLanguage());
 
     controlRoot.style.display = visible ? 'flex' : 'none';
     controlRoot.style.background = enabled ? 'rgba(0, 161, 214, 0.92)' : 'rgba(96, 96, 96, 0.92)';
     controlRoot.style.borderColor = enabled ? 'rgba(255, 255, 255, 0.28)' : 'rgba(255, 255, 255, 0.18)';
 
     if (label) {
-      label.textContent = enabled ? `AI字幕自动开：开（${toggleShortcut}）` : `AI字幕自动开：关（${toggleShortcut}）`;
+      label.textContent = enabled
+        ? `AI字幕自动开：开｜偏好：${preferredLanguage}（${toggleShortcut}）`
+        : `AI字幕自动开：关｜偏好：${preferredLanguage}（${toggleShortcut}）`;
     }
   }
 
