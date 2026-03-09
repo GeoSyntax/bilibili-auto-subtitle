@@ -764,19 +764,26 @@
 
   async function detectAiSubtitle(identity) {
     const fromPage = detectAiSubtitleFromPageData();
-    if (fromPage.hasNormalSubtitle || fromPage.found) return fromPage;
+    if (fromPage.found) return fromPage;
 
     const fromApi = await detectAiSubtitleFromApi(identity);
-    if (fromApi.hasNormalSubtitle || fromApi.found) return fromApi;
+    if (fromApi.found) return fromApi;
 
-    return detectAiSubtitleFromDom();
+    const fromDom = detectAiSubtitleFromDom();
+    if (fromDom.found) return fromDom;
+
+    return {
+      found: false,
+      hasNormalSubtitle: Boolean(fromPage.hasNormalSubtitle || fromApi.hasNormalSubtitle || fromDom.hasNormalSubtitle),
+      source: fromDom.source || fromApi.source || fromPage.source,
+    };
   }
 
   async function enableSubtitle(identity, state, options = {}) {
     if (!identity || !state) return false;
 
     const force = Boolean(options.force);
-    if (!force && state.hasAttemptedEnable) return isSubtitleEnabled();
+    if (!force && state.hasAttemptedEnable && isSubtitleEnabled()) return true;
     if (!force && state.userIntervened) return false;
 
     if (isSubtitleEnabled()) {
@@ -794,10 +801,10 @@
       const aiSubtitleItem = getAiSubtitleItem();
       if (aiSubtitleItem) {
         aiSubtitleItem.click();
-        state.hasAttemptedEnable = true;
         await wait(450 + attempt * 300);
 
         if (isSubtitleEnabled() || !isSubtitleExplicitlyClosed()) {
+          state.hasAttemptedEnable = true;
           state.lastKnownSubtitleEnabled = true;
           log('已自动选中 AI 字幕', identity.key);
           return true;
@@ -807,7 +814,6 @@
       const button = getSubtitleButton();
       if (button) {
         button.click();
-        state.hasAttemptedEnable = true;
         await wait(450 + attempt * 300);
 
         const retriedAiSubtitleItem = getAiSubtitleItem();
@@ -817,6 +823,7 @@
         }
 
         if (isSubtitleEnabled() || !isSubtitleExplicitlyClosed()) {
+          state.hasAttemptedEnable = true;
           state.lastKnownSubtitleEnabled = true;
           log('已自动开启字幕', identity.key);
           return true;
@@ -877,11 +884,6 @@
 
     if (state.userIntervened) {
       log('检测到用户已手动关闭字幕，跳过自动开启', identity.key);
-      return;
-    }
-
-    if (state.hasAttemptedEnable && !isSubtitleEnabled()) {
-      log('当前视频已尝试自动开启，且用户可能已手动关闭，停止重试', identity.key);
       return;
     }
 
