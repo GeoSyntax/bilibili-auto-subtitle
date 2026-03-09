@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Auto AI Subtitle
 // @namespace    https://www.bilibili.com/
-// @version      0.2.0
+// @version      0.3.0
 // @description  Auto enable AI subtitles on Bilibili video pages when available.
 // @author       Claude Code
 // @match        https://www.bilibili.com/video/*
