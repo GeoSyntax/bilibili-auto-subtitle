@@ -532,16 +532,6 @@
   function isSubtitleEnabled() {
     if (isSubtitleExplicitlyClosed()) return false;
 
-    const button = getSubtitleButton();
-    if (button) {
-      const className = button.className || '';
-      const ariaPressed = button.getAttribute('aria-pressed');
-      const ariaChecked = button.getAttribute('aria-checked');
-
-      if (/active|on|selected|checked|enable|opened|show/i.test(className)) return true;
-      if (ariaPressed === 'true' || ariaChecked === 'true') return true;
-    }
-
     return hasSubtitleDomVisible();
   }
 
@@ -693,12 +683,12 @@
       const subtitleItems = flattenSubtitleItems(subtitleCandidates);
       const summary = summarizeSubtitleAvailability(subtitleItems);
 
-      if (summary.hasNormal) {
-        return { found: false, hasNormalSubtitle: true, source: 'page-data-normal-subtitle' };
+      if (summary.hasAi) {
+        return { found: true, hasNormalSubtitle: Boolean(summary.hasNormal), source: 'page-data-ai-subtitle' };
       }
 
-      if (summary.hasAi) {
-        return { found: true, hasNormalSubtitle: false, source: 'page-data-ai-subtitle' };
+      if (summary.hasNormal) {
+        return { found: false, hasNormalSubtitle: true, source: 'page-data-normal-subtitle' };
       }
     }
 
@@ -736,12 +726,12 @@
         const subtitleItems = flattenSubtitleItems(subtitleCandidates);
         const summary = summarizeSubtitleAvailability(subtitleItems);
 
-        if (summary.hasNormal) {
-          return { found: false, hasNormalSubtitle: true, source: endpoint };
+        if (summary.hasAi) {
+          return { found: true, hasNormalSubtitle: Boolean(summary.hasNormal), source: endpoint };
         }
 
-        if (summary.hasAi) {
-          return { found: true, hasNormalSubtitle: false, source: endpoint };
+        if (summary.hasNormal) {
+          return { found: false, hasNormalSubtitle: true, source: endpoint };
         }
       } catch (error) {
         log('接口检测失败', endpoint, error);
@@ -900,28 +890,18 @@
       return;
     }
 
-    if (state.subtitleCheckCompleted && state.hasNormalSubtitle) {
-      log('当前视频已确认存在普通字幕，跳过重复检测', identity.key);
-      return;
-    }
-
     const detection = await detectAiSubtitle(identity);
     if (token !== processToken) return;
 
     state.subtitleCheckCompleted = true;
     state.hasNormalSubtitle = Boolean(detection.hasNormalSubtitle);
 
-    if (detection.hasNormalSubtitle) {
-      log('当前视频存在普通字幕，跳过自动开启 AI 字幕', identity.key, detection.source);
-      return;
-    }
-
     if (!detection.found) {
       log('当前视频未检测到可自动开启的 AI 字幕', identity.key, detection.source);
       return;
     }
 
-    log('当前视频无普通字幕，检测到 AI 字幕，准备自动开启', identity.key, detection.source);
+    log('当前视频检测到 AI 字幕，准备自动开启', identity.key, detection.source, detection.hasNormalSubtitle ? 'normal-subtitle-present' : 'no-normal-subtitle');
     await enableSubtitle(identity, state);
   }
 
@@ -1044,34 +1024,37 @@
     updateControlView();
 
     const toggleShortcut = getShortcut(STORAGE_KEY_TOGGLE_SHORTCUT, 'Alt+A');
-    showToast(enabled ? `已开启自动字幕（${toggleShortcut}）` : `已关闭自动字幕（${toggleShortcut}）`);
+    showToast(enabled ? `已开启自动 AI 字幕（${toggleShortcut}）` : `已关闭自动 AI 字幕（${toggleShortcut}）`);
 
     const identity = getVideoIdentity();
 
     if (enabled) {
       if (identity) {
-        const state = resetIdentityState(identity);
+        resetIdentityState(identity);
         currentIdentityKey = identity.key;
-        enableSubtitle(identity, state, { force: true }).catch((error) => {
-          log('手动开启当前字幕失败', error);
+        processCurrentPage('feature-enabled').catch((error) => {
+          log('开启自动 AI 字幕后处理当前页面失败', error);
         });
-      } else {
-        scheduleCheck('manual-enable');
+        return;
       }
-    } else {
-      processToken += 1;
-      if (identity) {
-        const state = getIdentityState(identity);
-        if (state) {
-          state.userIntervened = true;
-          state.hasAttemptedEnable = false;
-          state.lastKnownSubtitleEnabled = false;
-        }
-      }
-      disableSubtitle().catch((error) => {
-        log('关闭当前字幕失败', error);
-      });
+
+      scheduleCheck('feature-enabled');
+      return;
     }
+
+    processToken += 1;
+    if (!identity) return;
+
+    const state = getIdentityState(identity);
+    if (state) {
+      state.userIntervened = true;
+      state.hasAttemptedEnable = false;
+      state.lastKnownSubtitleEnabled = false;
+    }
+
+    disableSubtitle().catch((error) => {
+      log('关闭当前 AI 字幕失败', error);
+    });
   }
 
   function createControl() {
