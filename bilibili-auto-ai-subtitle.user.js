@@ -756,7 +756,7 @@
     });
 
     return {
-      found: !!aiItem && !hasNormalSubtitle,
+      found: !!aiItem,
       hasNormalSubtitle,
       source: aiItem ? 'dom-ai-item' : 'dom-none',
     };
@@ -803,7 +803,7 @@
         aiSubtitleItem.click();
         await wait(450 + attempt * 300);
 
-        if (isSubtitleEnabled() || !isSubtitleExplicitlyClosed()) {
+        if (isSubtitleEnabled()) {
           state.hasAttemptedEnable = true;
           state.lastKnownSubtitleEnabled = true;
           log('已自动选中 AI 字幕', identity.key);
@@ -822,7 +822,7 @@
           await wait(300 + attempt * 200);
         }
 
-        if (isSubtitleEnabled() || !isSubtitleExplicitlyClosed()) {
+        if (isSubtitleEnabled()) {
           state.hasAttemptedEnable = true;
           state.lastKnownSubtitleEnabled = true;
           log('已自动开启字幕', identity.key);
@@ -833,7 +833,7 @@
       await wait(400 + attempt * 250);
     }
 
-    return isSubtitleEnabled() || !isSubtitleExplicitlyClosed();
+    return isSubtitleEnabled();
   }
 
   async function disableSubtitle() {
