@@ -71,6 +71,8 @@
   let controlRoot = null;
   let toastRoot = null;
   let toastTimer = null;
+  let currentVideoEl = null;
+  let videoEventHandler = null;
 
   function log(...args) {
     console.log(SCRIPT_TAG, ...args);
@@ -747,6 +749,28 @@
     return isSubtitleExplicitlyClosed() || !isSubtitleEnabled();
   }
 
+  function bindVideoAutoCheck() {
+    if (!getFeatureEnabled()) return;
+
+    const videoEl = document.querySelector("video");
+    if (!videoEl || videoEl === currentVideoEl) return;
+
+    if (currentVideoEl && videoEventHandler) {
+      currentVideoEl.removeEventListener("play", videoEventHandler);
+      currentVideoEl.removeEventListener("loadedmetadata", videoEventHandler);
+    }
+
+    currentVideoEl = videoEl;
+    videoEventHandler = () => {
+      scheduleCheck("video-event");
+    };
+
+    videoEl.addEventListener("play", videoEventHandler, { passive: true });
+    videoEl.addEventListener("loadedmetadata", videoEventHandler, {
+      passive: true,
+    });
+  }
+
   async function processCurrentPage(reason) {
     const token = ++processToken;
 
@@ -767,6 +791,8 @@
 
     const playerReady = await waitForPlayerReady(identity.key);
     if (!playerReady || token !== processToken) return;
+
+    bindVideoAutoCheck();
 
     const latestIdentity = getVideoIdentity();
     if (!latestIdentity || latestIdentity.key !== identity.key) return;
@@ -845,6 +871,7 @@
         lastUrl = location.href;
       }
       ensureControlMounted();
+      bindVideoAutoCheck();
       scheduleCheck("popstate");
     });
   }
@@ -885,7 +912,11 @@
       const identity = getVideoIdentity();
       if (!identity) return;
       const state = getIdentityState(identity);
-      if (!state || state.hasAttemptedEnable || state.userIntervened) return;
+      if (!state) return;
+
+      bindVideoAutoCheck();
+
+      if (state.hasAttemptedEnable || state.userIntervened) return;
 
       scheduleCheck("dom-mutation");
     });
@@ -937,6 +968,7 @@
         resetIdentityState(identity);
         currentIdentityKey = identity.key;
       }
+      bindVideoAutoCheck();
       scheduleCheck("manual-enable");
     } else {
       processToken += 1;
@@ -948,6 +980,12 @@
           state.lastKnownSubtitleEnabled = false;
         }
       }
+      if (currentVideoEl && videoEventHandler) {
+        currentVideoEl.removeEventListener("play", videoEventHandler);
+        currentVideoEl.removeEventListener("loadedmetadata", videoEventHandler);
+      }
+      currentVideoEl = null;
+      videoEventHandler = null;
       disableSubtitle().catch((error) => {
         log("关闭当前字幕失败", error);
       });
