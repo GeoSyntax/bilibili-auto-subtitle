@@ -20,6 +20,8 @@
   const STORAGE_KEY_PANEL_SHORTCUT = "bili-auto-ai-subtitle:shortcut-panel";
   const MAX_PLAYER_WAIT_ATTEMPTS = 10;
   const MAX_ENABLE_ATTEMPTS = 3;
+  const AUTO_POLL_INTERVAL_MS = 200;
+  const AUTO_POLL_CLICK_GAP_MS = 1200;
   const PROCESS_BACKOFF_MS = [
     250, 500, 900, 1400, 2000, 2800, 3600, 4500, 5500, 7000,
   ];
@@ -71,8 +73,10 @@
   let controlRoot = null;
   let toastRoot = null;
   let toastTimer = null;
-  let currentVideoEl = null;
-  let videoEventHandler = null;
+  let identityWatchTimer = null;
+  let autoPollTimer = null;
+  let lastIdentityKey = "";
+  let lastAutoClickAt = 0;
 
   function log(...args) {
     console.log(SCRIPT_TAG, ...args);
@@ -749,28 +753,6 @@
     return isSubtitleExplicitlyClosed() || !isSubtitleEnabled();
   }
 
-  function bindVideoAutoCheck() {
-    if (!getFeatureEnabled()) return;
-
-    const videoEl = document.querySelector("video");
-    if (!videoEl || videoEl === currentVideoEl) return;
-
-    if (currentVideoEl && videoEventHandler) {
-      currentVideoEl.removeEventListener("play", videoEventHandler);
-      currentVideoEl.removeEventListener("loadedmetadata", videoEventHandler);
-    }
-
-    currentVideoEl = videoEl;
-    videoEventHandler = () => {
-      scheduleCheck("video-event");
-    };
-
-    videoEl.addEventListener("play", videoEventHandler, { passive: true });
-    videoEl.addEventListener("loadedmetadata", videoEventHandler, {
-      passive: true,
-    });
-  }
-
   async function processCurrentPage(reason) {
     const token = ++processToken;
 
@@ -792,21 +774,11 @@
     const playerReady = await waitForPlayerReady(identity.key);
     if (!playerReady || token !== processToken) return;
 
-    bindVideoAutoCheck();
-
     const latestIdentity = getVideoIdentity();
     if (!latestIdentity || latestIdentity.key !== identity.key) return;
 
     if (state.userIntervened) {
       log("检测到用户已手动关闭字幕，跳过自动开启", identity.key);
-      return;
-    }
-
-    if (state.hasAttemptedEnable && !isSubtitleEnabled()) {
-      log(
-        "当前视频已尝试自动开启，且用户可能已手动关闭，停止重试",
-        identity.key,
-      );
       return;
     }
 
@@ -871,9 +843,51 @@
         lastUrl = location.href;
       }
       ensureControlMounted();
-      bindVideoAutoCheck();
       scheduleCheck("popstate");
     });
+  }
+
+  function startIdentityWatch() {
+    if (identityWatchTimer) window.clearInterval(identityWatchTimer);
+
+    identityWatchTimer = window.setInterval(() => {
+      if (!isVideoPage()) return;
+      const identity = getVideoIdentity();
+      const key = identity?.key || "";
+      if (!key || key === lastIdentityKey) return;
+
+      lastIdentityKey = key;
+      resetIdentityState(identity);
+      currentIdentityKey = key;
+      scheduleCheck("identity-change");
+    }, 800);
+  }
+
+  function startAutoPoll() {
+    if (autoPollTimer) window.clearInterval(autoPollTimer);
+
+    autoPollTimer = window.setInterval(() => {
+      if (!isVideoPage()) return;
+      if (!getFeatureEnabled()) return;
+
+      const aiSubtitleItem = getAiSubtitleItem();
+      const closeSwitch = getSubtitleCloseSwitch();
+      if (!aiSubtitleItem || !closeSwitch) return;
+
+      const now = Date.now();
+      if (now - lastAutoClickAt < AUTO_POLL_CLICK_GAP_MS) return;
+
+      const explicitlyClosed = closeSwitch.classList.contains("bpx-state-active");
+      if (explicitlyClosed) {
+        aiSubtitleItem.click();
+        lastAutoClickAt = now;
+        const identity = getVideoIdentity();
+        if (identity) {
+          const state = getIdentityState(identity);
+          if (state) state.lastKnownSubtitleEnabled = true;
+        }
+      }
+    }, AUTO_POLL_INTERVAL_MS);
   }
 
   function bindUserInterventionListener() {
@@ -912,11 +926,7 @@
       const identity = getVideoIdentity();
       if (!identity) return;
       const state = getIdentityState(identity);
-      if (!state) return;
-
-      bindVideoAutoCheck();
-
-      if (state.hasAttemptedEnable || state.userIntervened) return;
+      if (!state || state.hasAttemptedEnable || state.userIntervened) return;
 
       scheduleCheck("dom-mutation");
     });
@@ -968,7 +978,6 @@
         resetIdentityState(identity);
         currentIdentityKey = identity.key;
       }
-      bindVideoAutoCheck();
       scheduleCheck("manual-enable");
     } else {
       processToken += 1;
@@ -980,12 +989,6 @@
           state.lastKnownSubtitleEnabled = false;
         }
       }
-      if (currentVideoEl && videoEventHandler) {
-        currentVideoEl.removeEventListener("play", videoEventHandler);
-        currentVideoEl.removeEventListener("loadedmetadata", videoEventHandler);
-      }
-      currentVideoEl = null;
-      videoEventHandler = null;
       disableSubtitle().catch((error) => {
         log("关闭当前字幕失败", error);
       });
@@ -1122,6 +1125,8 @@
     bindHotkeys();
     registerMenuCommands();
     ensureControlMounted();
+    startIdentityWatch();
+    startAutoPoll();
     scheduleCheck("init");
 
     PROCESS_BACKOFF_MS.forEach((delay, index) => {
