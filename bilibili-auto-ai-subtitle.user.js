@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         B站自动签到
+// @name         B站自动打开ai字幕
 // @namespace    https://www.bilibili.com/
 // @version      0.1.0
 // @description  Auto enable AI subtitles on Bilibili video pages when available.
